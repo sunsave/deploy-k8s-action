@@ -1,0 +1,73 @@
+name: Deploy K8s action
+description: Builds and deploys a K8s project to AWS EKS
+inputs:
+  aws-access-key-id:
+    description: "aws-access-key-id"
+    required: true
+  aws-secret-access-key:
+    description: "aws-secret-access-key"
+    required: true
+  aws-region:
+    description: "aws-region"
+    required: true
+  cluster-name:
+    description: "cluster-name"
+    required: true
+  ecr-repository:
+    description: "ecr-repository"
+    required: true
+  path-to-manifest:
+    description: "path-to-manifest"
+    required: true
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/checkout@master
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ inputs.aws-access-key-id }}
+        aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
+        aws-region: ${{ inputs.aws-region }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+
+    - name: Set up Docker Buildx
+      id: buildx
+      uses: docker/setup-buildx-action@master
+
+    - name: Docker cache layers
+      uses: actions/cache@v2
+      with:
+        path: /tmp/.buildx-cache
+        key: ${{ runner.os }}-single-buildx-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-single-buildx
+
+    - name: Build & Push Image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        IMAGE_NAME: ${{ steps.login-ecr.outputs.registry }}/${{ inputs.ecr-repository }}:${{ github.sha }}
+      shell: bash
+      run: |
+        docker build -t ${{ env.IMAGE_NAME }} . --platform=linux/amd64
+        docker push ${{ env.IMAGE_NAME }}
+        echo "::set-output name=image::${{ env.IMAGE_NAME }}"
+
+    - name: Deploy to Kubernetes cluster
+      env:
+        IMAGE_NAME: ${{ steps.login-ecr.outputs.registry }}/${{ inputs.ecr-repository }}:${{ github.sha }}
+      shell: bash
+      run: |
+        aws sts get-caller-identity
+        aws eks update-kubeconfig --name ${{ inputs.cluster-name }} --region ${{ inputs.aws-region }}
+        kubectl apply -f ${{ inputs.path-to-manifest }}
+        kubectl set image deployment/${{ inputs.ecr-repository }} ${{ inputs.ecr-repository }}=${{ env.IMAGE_NAME }}
+
+    - name: Verify deployment
+      shell: bash
+      run: |
+        kubectl rollout status deployment/${{ inputs.ecr-repository }}
